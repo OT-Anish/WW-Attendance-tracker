@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>OpenText WW Team Attendance Tracker</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f4f6fb; min-height: 100vh; }
+button { font-family: inherit; cursor: pointer; }
+input { font-family: inherit; }
+th, td { border: none; }
+#app-wrap { min-height: 100vh; background: #f4f6fb; position: relative; overflow: hidden; }
+#bg-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; }
+#app-inner { position: relative; z-index: 1; }
+.stat-card { background: rgba(255,255,255,0.92); border-radius: 10px; border: 0.5px solid rgba(0,51,204,0.12); padding: 14px 16px; min-width: 120px; flex: 1; }
+</style>
+</head>
+<body>
+<div id="app-wrap">
+  <canvas id="bg-canvas"></canvas>
+  <div id="app-inner"><div id="root"></div></div>
+</div>
+
+<!-- Firebase SDKs -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, onValue, remove } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAi3nATXywlgtiOW4FbFFzS_8BX-JscpcE",
+    authDomain: "holiday-tracker-f367b.firebaseapp.com",
+    databaseURL: "https://holiday-tracker-f367b-default-rtdb.firebaseio.com",
+    projectId: "holiday-tracker-f367b",
+    storageBucket: "holiday-tracker-f367b.firebasestorage.app",
+    messagingSenderId: "663944033676",
+    appId: "1:663944033676:web:6904d739bc0344b72292a9"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  // Expose Firebase helpers to window so React app can use them
+  window._fbSet = (path, value) => set(ref(db, path), value);
+  window._fbRemove = (path) => remove(ref(db, path));
+  window._fbListen = (path, cb) => onValue(ref(db, path), snap => cb(snap.val()));
+  window._fbReady = true;
+
+  // Signal app to start once Firebase is ready
+  document.dispatchEvent(new Event('firebase-ready'));
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script>
+// ── Background canvas ──
+(function drawBG() {
+  const canvas = document.getElementById("bg-canvas");
+  function render() {
+    const W = window.innerWidth, H = window.innerHeight;
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0,0,W,H);
+    const blobs = [
+      {x:W*0.92,y:H*0.06,r:220,c:"#0033CC"},
+      {x:W*0.04,y:H*0.18,r:140,c:"#0055FF"},
+      {x:W*0.88,y:H*0.55,r:120,c:"#0033CC"},
+      {x:W*0.06,y:H*0.8, r:110,c:"#0055FF"},
+      {x:W*0.5, y:H*0.97,r:170,c:"#003399"},
+    ];
+    blobs.forEach(({x,y,r,c})=>{
+      const g=ctx.createRadialGradient(x,y,0,x,y,r);
+      g.addColorStop(0,c+"20"); g.addColorStop(1,c+"00");
+      ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+      ctx.fillStyle=g; ctx.fill();
+    });
+    for(let gx=28;gx<W;gx+=30){
+      for(let gy=28;gy<H;gy+=30){
+        ctx.beginPath(); ctx.arc(gx,gy,1.1,0,Math.PI*2);
+        ctx.fillStyle="rgba(0,51,204,0.04)"; ctx.fill();
+      }
+    }
+    ctx.save(); ctx.globalAlpha=0.04; ctx.strokeStyle="#0033CC"; ctx.lineWidth=1;
+    for(let i=0;i<9;i++){const o=W*0.7+i*18;ctx.beginPath();ctx.moveTo(o,0);ctx.lineTo(o+130,130);ctx.stroke();}
+    ctx.restore();
+    ctx.save(); ctx.globalAlpha=0.04; ctx.strokeStyle="#0033CC"; ctx.lineWidth=1.5;
+    for(let i=0;i<5;i++){ctx.beginPath();ctx.arc(-20,H+20,110+i*38,Math.PI*1.35,Math.PI*1.92);ctx.stroke();}
+    ctx.restore();
+  }
+  render();
+  window.addEventListener("resize", render);
+})();
+
+// ── Firebase Realtime Database Storage (live sync for all teammates) ──
+window._fbCallbacks = {};
+window.storage = {
+  get: async function(key) {
+    // Data is pushed via onValue listener; return cached value
+    return window._fbCache && window._fbCache[key] ? {value: window._fbCache[key]} : null;
+  },
+  set: async function(key, value) {
+    const path = "attendance/" + key.replace(/[.#$\[\]]/g, "_");
+    if (window._fbSet) {
+      try { await window._fbSet(path, value); } catch(e) { console.error("FB set error", e); }
+    }
+    if (!window._fbCache) window._fbCache = {};
+    window._fbCache[key] = value;
+    return {key, value};
+  },
+  delete: async function(key) {
+    const path = "attendance/" + key.replace(/[.#$\[\]]/g, "_");
+    if (window._fbRemove) {
+      try { await window._fbRemove(path); } catch(e) { console.error("FB remove error", e); }
+    }
+    if (window._fbCache) delete window._fbCache[key];
+    return {key, deleted: true};
+  },
+  listenAll: function(cb) {
+    // Called by app to get live updates from Firebase
+    if (window._fbListen) {
+      window._fbListen("attendance", cb);
+    }
+  }
+};
+
+const { useState, useEffect, useCallback, useRef } = React;
+
+const TEAM_MEMBERS = [
+  {name:"Maria Campos",region:"AMS",country:"US"},
+  {name:"Elena-Mihaela Asavei",region:"EMEA",country:"Romania"},
+  {name:"Kirsty Drennan",region:"EMEA",country:"UK"},
+  {name:"Narasimha Rao Sattineedi",region:"APJ",country:"India"},
+  {name:"Sunki Sruthi",region:"APJ",country:"India"},
+  {name:"Gerry Wilson",region:"AMS",country:"US"},
+  {name:"Rosa Isela Mora",region:"AMS",country:"Mexico"},
+  {name:"Emylda Barros",region:"AMS",country:"Costa Rica"},
+  {name:"Francis Zamora",region:"AMS",country:"Costa Rica"},
+  {name:"Johnny Sibaja",region:"AMS",country:"Costa Rica"},
+  {name:"Steven Navarro",region:"AMS",country:"Costa Rica"},
+  {name:"Valery Mena",region:"AMS",country:"Costa Rica"},
+  {name:"Heisel Ramirez",region:"AMS",country:"Costa Rica"},
+  {name:"Daniela Martinez",region:"AMS",country:"Costa Rica"},
+  {name:"Fiorella Granados",region:"AMS",country:"Costa Rica"},
+  {name:"Inga Culkstens",region:"EMEA",country:"Romania"},
+  {name:"Maria Elena Romero",region:"AMS",country:"Mexico"},
+  {name:"Sathishbabu S",region:"APJ",country:"India"},
+  {name:"Anish JS",region:"APJ",country:"India"},
+  {name:"Dan Hong (Demi)",region:"APJ",country:"China"},
+  {name:"Jayashree M",region:"APJ",country:"India"},
+  {name:"Sabreen F Fazal Ahmed",region:"APJ",country:"India"},
+  {name:"Suresh G",region:"APJ",country:"India"},
+  {name:"Ya-Jing Mu",region:"APJ",country:"China"},
+  {name:"Bogdan Ungureanu",region:"EMEA",country:"Romania"},
+  {name:"Alexandra Holcan",region:"EMEA",country:"Romania"},
+  {name:"Andrei Anghel",region:"EMEA",country:"Romania"},
+  {name:"Emilian Claudiu Lupulescu",region:"EMEA",country:"Romania"},
+  {name:"Lucian Gabriel Stoenescu",region:"EMEA",country:"Romania"},
+];
+
+const CODES=[
+  {code:"H",label:"Holiday",color:"#1040A0",bg:"#E6F1FB"},
+  {code:"V",label:"Vacation/OOO",color:"#3B6D11",bg:"#EAF3DE"},
+  {code:"S",label:"Sick/Bereavement",color:"#A32D2D",bg:"#FCEBEB"},
+  {code:"W",label:"WFH",color:"#854F0B",bg:"#FAEEDA"},
+  {code:"M",label:"Half Day/Float",color:"#534AB7",bg:"#EEEDFE"},
+];
+const CODE_MAP=Object.fromEntries(CODES.map(c=>[c.code,c]));
+const FULL_MONTHS=["January","February","March","April","May","June","July","August","September","October","November","December"];
+const WEEKDAYS=["Su","Mo","Tu","We","Th","Fr","Sa"];
+function getDays(y,m){return new Date(y,m+1,0).getDate();}
+function getWd(y,m,d){return new Date(y,m,d).getDay();}
+
+function OTLogo({size=38}){
+  return React.createElement("svg",{width:size,height:size,viewBox:"0 0 100 100",fill:"none"},
+    React.createElement("defs",null,
+      React.createElement("linearGradient",{id:"otg",x1:"0%",y1:"0%",x2:"100%",y2:"100%"},
+        React.createElement("stop",{offset:"0%",stopColor:"#55AAFF"}),
+        React.createElement("stop",{offset:"100%",stopColor:"#0022CC"})
+      )
+    ),
+    React.createElement("circle",{cx:"35",cy:"55",r:"28",stroke:"url(#otg)",strokeWidth:"18",fill:"none"}),
+    React.createElement("rect",{x:"68",y:"18",width:"18",height:"64",rx:"9",fill:"url(#otg)"}),
+    React.createElement("rect",{x:"58",y:"18",width:"38",height:"18",rx:"9",fill:"url(#otg)"}),
+    React.createElement("rect",{x:"86",y:"36",width:"10",height:"14",rx:"4",fill:"#0a1a6e"})
+  );
+}
+
+function App(){
+  const today=new Date();
+  const [vy,setVy]=useState(today.getFullYear());
+  const [vm,setVm]=useState(today.getMonth());
+  const [data,setData]=useState({});
+  const [loading,setLoading]=useState(true);
+  const [saving,setSaving]=useState(false);
+  const [lastSync,setLastSync]=useState(null);
+  const [filter,setFilter]=useState("All");
+  const [search,setSearch]=useState("");
+  const [sel,setSel]=useState(null);
+  const [note,setNote]=useState("");
+  const [tab,setTab]=useState("dashboard");
+  const KEY="ww-attendance-v2";
+
+  const saveData=useCallback(async(nd)=>{
+    setSaving(true);
+    try{
+      await window.storage.set(KEY, JSON.stringify(nd));
+      setLastSync(new Date());
+      setNote("Saved ✓");
+      setTimeout(()=>setNote(""),1800);
+    } catch(e){setNote("Error saving");}
+    setSaving(false);
+  },[]);
+
+  useEffect(()=>{
+    // Listen for real-time Firebase updates
+    const startListening = () => {
+      window.storage.listenAll((fbData) => {
+        if (fbData && fbData[KEY]) {
+          try {
+            setData(JSON.parse(fbData[KEY]));
+            setLastSync(new Date());
+          } catch(e) {}
+        } else if (fbData === null) {
+          setData({});
+          setLastSync(new Date());
+        }
+        setLoading(false);
+      });
+    };
+
+    if (window._fbReady) {
+      startListening();
+    } else {
+      document.addEventListener('firebase-ready', startListening, {once: true});
+      // Fallback: if Firebase takes too long, stop loading spinner
+      setTimeout(() => setLoading(false), 4000);
+    }
+  },[]);
+
+  const getCK=(name,y,m,d)=>`${name}::${y}-${String(m+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+  const getCode=(name,d)=>data[getCK(name,vy,vm,d)]||null;
+
+  const applyCode=(code)=>{
+    if(!sel)return;
+    const k=getCK(sel.name,vy,vm,sel.day);
+    const nd={...data};
+    if(nd[k]===code)delete nd[k];else nd[k]=code;
+    setData(nd);saveData(nd);
+    setSel(prev=>prev?{...prev,code:nd[k]||null}:null);
+  };
+
+  const days=Array.from({length:getDays(vy,vm)},(_,i)=>i+1);
+  const prevM=()=>{if(vm===0){setVy(y=>y-1);setVm(11);}else setVm(m=>m-1);};
+  const nextM=()=>{if(vm===11){setVy(y=>y+1);setVm(0);}else setVm(m=>m+1);};
+  const filtered=TEAM_MEMBERS.filter(m=>(filter==="All"||m.region===filter)&&m.name.toLowerCase().includes(search.toLowerCase()));
+
+  const todayStr=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
+  const oooToday=TEAM_MEMBERS.filter(m=>["V","S","M"].includes(data[`${m.name}::${todayStr}`]||"")).length;
+  const holidayToday=TEAM_MEMBERS.filter(m=>(data[`${m.name}::${todayStr}`]||"")==="H").length;
+  const wfhToday=TEAM_MEMBERS.filter(m=>(data[`${m.name}::${todayStr}`]||"")==="W").length;
+  const monthOOO=TEAM_MEMBERS.reduce((s,m)=>s+days.filter(d=>["V","S","M"].includes(getCode(m.name,d))).length,0);
+  const monthWFH=TEAM_MEMBERS.reduce((s,m)=>s+days.filter(d=>getCode(m.name,d)==="W").length,0);
+
+  const regionData=["AMS","APJ","EMEA"].map(r=>{
+    const ms=TEAM_MEMBERS.filter(m=>m.region===r);
+    const ooo=ms.reduce((s,m)=>s+days.filter(d=>["V","S","M"].includes(getCode(m.name,d))).length,0);
+    const hol=ms.reduce((s,m)=>s+days.filter(d=>getCode(m.name,d)==="H").length,0);
+    return{r,count:ms.length,ooo,hol};
+  });
+
+  const memberOOO=TEAM_MEMBERS.map(m=>({name:m.name,region:m.region,ooo:days.filter(d=>["V","S","M"].includes(getCode(m.name,d))).length})).sort((a,b)=>b.ooo-a.ooo).slice(0,5);
+  const codeDist=CODES.map(c=>({...c,count:TEAM_MEMBERS.reduce((s,m)=>s+days.filter(d=>getCode(m.name,d)===c.code).length,0)}));
+
+  const h=(tag,props,...ch)=>React.createElement(tag,props,...ch);
+
+  if(loading)return h("div",{style:{padding:"3rem",textAlign:"center",color:"#555"}},"Loading...");
+
+  const Header=()=>h("div",{style:{background:"linear-gradient(135deg,#001899 0%,#0033CC 60%,#0055FF 100%)",padding:"14px 22px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}},
+    h("div",{style:{display:"flex",alignItems:"center",gap:14}},
+      React.createElement(OTLogo,{size:40}),
+      h("div",{style:{width:1,height:32,background:"rgba(255,255,255,0.25)"}}),
+      h("div",null,
+        h("div",{style:{fontSize:"15px",fontWeight:600,color:"#fff",letterSpacing:"0.02em"}},"WW Team Attendance"),
+        h("div",{style:{fontSize:"11px",color:"rgba(255,255,255,0.6)",marginTop:2}},"Planned Vacation & Holidays Tracker — OpenText")
+      )
+    ),
+    h("div",{style:{display:"flex",gap:8,alignItems:"center"}},
+      saving&&h("span",{style:{fontSize:"11px",color:"rgba(255,255,255,0.6)"}},"Syncing..."),
+      lastSync&&!saving&&h("span",{style:{fontSize:"11px",color:"rgba(255,255,255,0.5)"}},`Synced ${lastSync.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}`),
+      h("div",{style:{width:7,height:7,borderRadius:"50%",background:saving?"#FFCC00":"#4ADE80",marginLeft:4}})
+    )
+  );
+
+  const TabNav=()=>h("div",{style:{display:"flex",gap:0,background:"rgba(0,30,150,0.06)",borderBottom:"0.5px solid rgba(0,51,204,0.15)"}},
+    [{id:"dashboard",label:"Dashboard"},{id:"tracker",label:"Attendance Tracker"}].map(t=>
+      h("button",{key:t.id,onClick:()=>setTab(t.id),style:{padding:"10px 24px",fontSize:"13px",fontWeight:tab===t.id?600:400,color:tab===t.id?"#0033CC":"#666",background:"transparent",border:"none",borderBottom:tab===t.id?"2.5px solid #0033CC":"2.5px solid transparent",cursor:"pointer"}},t.label)
+    )
+  );
+
+  const Dashboard=()=>h("div",{style:{padding:"18px 22px"}},
+    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10,marginBottom:18}},
+      [
+        {label:"Total Members",value:TEAM_MEMBERS.length,color:"#0033CC",icon:"👥"},
+        {label:"OOO Today",value:oooToday,color:"#A32D2D",icon:"🏖️"},
+        {label:"WFH Today",value:wfhToday,color:"#854F0B",icon:"🏠"},
+        {label:"Holidays Today",value:holidayToday,color:"#1040A0",icon:"📅"},
+        {label:"OOO This Month",value:monthOOO,color:"#3B6D11",icon:"📊"},
+        {label:"WFH This Month",value:monthWFH,color:"#854F0B",icon:"💻"},
+      ].map(({label,value,color,icon})=>
+        h("div",{key:label,className:"stat-card"},
+          h("div",{style:{fontSize:"20px",marginBottom:4}},icon),
+          h("div",{style:{fontSize:"26px",fontWeight:700,color,lineHeight:1}},value),
+          h("div",{style:{fontSize:"11px",color:"#666",marginTop:4,lineHeight:1.3}},label)
+        )
+      )
+    ),
+    h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:18}},
+      h("div",{style:{background:"rgba(255,255,255,0.92)",borderRadius:10,border:"0.5px solid rgba(0,51,204,0.12)",padding:"14px 16px"}},
+        h("div",{style:{fontSize:"13px",fontWeight:600,color:"#001899",marginBottom:12}},"Region Breakdown — "+FULL_MONTHS[vm]+" "+vy),
+        h("table",{style:{width:"100%",fontSize:"12px",borderCollapse:"collapse"}},
+          h("thead",null,h("tr",null,
+            ["Region","Members","OOO Days","Holidays"].map(c=>h("th",{key:c,style:{textAlign:"left",padding:"5px 6px",fontWeight:500,color:"#888",fontSize:"11px",borderBottom:"0.5px solid #e0e4ef"}},c))
+          )),
+          h("tbody",null,
+            regionData.map(({r,count,ooo,hol},i)=>h("tr",{key:r,style:{background:i%2?"rgba(0,51,204,0.03)":"transparent"}},
+              h("td",{style:{padding:"7px 6px"}},h("span",{style:{background:"#0033CC",color:"white",fontSize:"9px",fontWeight:700,padding:"2px 7px",borderRadius:3}},r)),
+              h("td",{style:{padding:"7px 6px",color:"#222"}},count),
+              h("td",{style:{padding:"7px 6px",color:"#A32D2D",fontWeight:ooo>0?600:400}},ooo||"—"),
+              h("td",{style:{padding:"7px 6px",color:"#1040A0",fontWeight:hol>0?600:400}},hol||"—")
+            ))
+          )
+        )
+      ),
+      h("div",{style:{background:"rgba(255,255,255,0.92)",borderRadius:10,border:"0.5px solid rgba(0,51,204,0.12)",padding:"14px 16px"}},
+        h("div",{style:{fontSize:"13px",fontWeight:600,color:"#001899",marginBottom:12}},"Leave Distribution — "+FULL_MONTHS[vm]+" "+vy),
+        h("div",{style:{display:"flex",flexDirection:"column",gap:9}},
+          codeDist.map(({code,label,color,bg,count})=>{
+            const pct=Math.round((count/Math.max(...codeDist.map(c=>c.count),1))*100);
+            return h("div",{key:code},
+              h("div",{style:{display:"flex",justifyContent:"space-between",marginBottom:3}},
+                h("div",{style:{display:"flex",alignItems:"center",gap:6}},
+                  h("span",{style:{width:18,height:18,borderRadius:3,background:bg,border:`1.5px solid ${color}`,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:"9px",fontWeight:700,color}},code),
+                  h("span",{style:{fontSize:"11px",color:"#555"}},label)
+                ),
+                h("span",{style:{fontSize:"12px",fontWeight:600,color}},count)
+              ),
+              h("div",{style:{height:6,background:"rgba(0,0,0,0.06)",borderRadius:3,overflow:"hidden"}},
+                h("div",{style:{height:"100%",width:`${pct}%`,background:color,borderRadius:3}})
+              )
+            );
+          })
+        )
+      )
+    ),
+    h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}},
+      h("div",{style:{background:"rgba(255,255,255,0.92)",borderRadius:10,border:"0.5px solid rgba(0,51,204,0.12)",padding:"14px 16px"}},
+        h("div",{style:{fontSize:"13px",fontWeight:600,color:"#001899",marginBottom:12}},"Top OOO Members — "+FULL_MONTHS[vm]),
+        memberOOO.filter(m=>m.ooo>0).length===0
+          ?h("div",{style:{fontSize:"12px",color:"#aaa",padding:"12px 0"}},"No OOO days recorded yet")
+          :h("div",{style:{display:"flex",flexDirection:"column",gap:8}},
+            memberOOO.filter(m=>m.ooo>0).map(({name,region,ooo},i)=>
+              h("div",{key:name,style:{display:"flex",alignItems:"center",gap:8}},
+                h("span",{style:{fontSize:"11px",fontWeight:700,color:"#0033CC",minWidth:18}},"#"+(i+1)),
+                h("div",{style:{flex:1}},
+                  h("div",{style:{fontSize:"12px",fontWeight:500,color:"#222"}},name),
+                  h("div",{style:{fontSize:"10px",color:"#aaa"}},region)
+                ),
+                h("span",{style:{fontSize:"12px",fontWeight:700,color:"#A32D2D"}},ooo+" days")
+              )
+            )
+          )
+      ),
+      h("div",{style:{background:"rgba(255,255,255,0.92)",borderRadius:10,border:"0.5px solid rgba(0,51,204,0.12)",padding:"14px 16px",display:"flex",flexDirection:"column",gap:10}},
+        h("div",{style:{fontSize:"13px",fontWeight:600,color:"#001899"}},"Month at a Glance"),
+        h("div",{style:{display:"flex",alignItems:"center",gap:8}},
+          h("button",{onClick:prevM,style:{padding:"3px 9px",borderRadius:6,border:"0.5px solid #ccd",background:"transparent",color:"#333",fontSize:"12px"}},"←"),
+          h("span",{style:{flex:1,textAlign:"center",fontWeight:500,fontSize:"13px",color:"#222"}},FULL_MONTHS[vm]+" "+vy),
+          h("button",{onClick:nextM,style:{padding:"3px 9px",borderRadius:6,border:"0.5px solid #ccd",background:"transparent",color:"#333",fontSize:"12px"}},"→")
+        ),
+        h("div",{style:{display:"flex",flexWrap:"wrap",gap:2}},
+          days.map(d=>{
+            const wd=getWd(vy,vm,d);
+            const isWe=wd===0||wd===6;
+            const isTdy=vy===today.getFullYear()&&vm===today.getMonth()&&d===today.getDate();
+            const totalOOO=TEAM_MEMBERS.filter(m=>["V","S","M"].includes(getCode(m.name,d))).length;
+            const intensity=totalOOO===0?0:totalOOO<3?1:totalOOO<6?2:3;
+            const bg=isWe?"rgba(0,0,0,0.04)":intensity===0?"rgba(0,51,204,0.05)":intensity===1?"rgba(0,51,204,0.15)":intensity===2?"rgba(0,51,204,0.3)":"rgba(0,51,204,0.5)";
+            return h("div",{key:d,onClick:()=>setTab("tracker"),style:{width:21,height:21,borderRadius:3,background:bg,border:isTdy?"2px solid #0033CC":"1px solid rgba(0,51,204,0.1)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"8px",color:intensity>=2?"white":"#aaa",fontWeight:isTdy?700:400,cursor:"pointer"}},d);
+          })
+        ),
+        h("div",{style:{fontSize:"10px",color:"#aaa"}},"Darker blue = more people OOO · click to open tracker"),
+        h("button",{onClick:()=>setTab("tracker"),style:{marginTop:"auto",padding:"9px 0",width:"100%",background:"#0033CC",color:"white",border:"none",borderRadius:8,fontSize:"13px",fontWeight:600,cursor:"pointer",letterSpacing:"0.02em"}},"Open Attendance Tracker →")
+      )
+    )
+  );
+
+  const Tracker=()=>h("div",null,
+    h("div",{style:{display:"flex",alignItems:"center",gap:10,padding:"10px 18px",borderBottom:"0.5px solid #dde",flexWrap:"wrap",background:"rgba(255,255,255,0.75)"}},
+      h("div",{style:{display:"flex",alignItems:"center",gap:6}},
+        h("button",{onClick:prevM,style:{padding:"4px 10px",borderRadius:6,border:"0.5px solid #ccd",background:"transparent",color:"#333",fontSize:"13px"}},"←"),
+        h("span",{style:{fontWeight:500,fontSize:"14px",minWidth:145,textAlign:"center",color:"#222"}},FULL_MONTHS[vm]+" "+vy),
+        h("button",{onClick:nextM,style:{padding:"4px 10px",borderRadius:6,border:"0.5px solid #ccd",background:"transparent",color:"#333",fontSize:"13px"}},"→")
+      ),
+      h("div",{style:{display:"flex",gap:3}},
+        ["All","AMS","APJ","EMEA"].map(r=>
+          h("button",{key:r,onClick:()=>setFilter(r),style:{padding:"3px 9px",fontSize:"11px",borderRadius:6,border:filter===r?"1.5px solid #0033CC":"0.5px solid #ccd",background:filter===r?"#0033CC":"transparent",color:filter===r?"white":"#666",fontWeight:filter===r?600:400}},r)
+        )
+      ),
+      h("input",{type:"text",placeholder:"Search member...",value:search,onChange:e=>setSearch(e.target.value),style:{padding:"4px 10px",fontSize:"12px",borderRadius:6,border:"0.5px solid #ccd",background:"#f8f9ff",color:"#222",width:140}})
+    ),
+    h("div",{style:{display:"flex",gap:10,padding:"6px 18px",flexWrap:"wrap",borderBottom:"0.5px solid #dde",background:"rgba(255,255,255,0.65)"}},
+      CODES.map(c=>h("div",{key:c.code,style:{display:"flex",alignItems:"center",gap:4}},
+        h("span",{style:{width:17,height:17,borderRadius:3,background:c.bg,border:`1.5px solid ${c.color}`,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:"9px",fontWeight:700,color:c.color}},c.code),
+        h("span",{style:{fontSize:"11px",color:"#666"}},c.label)
+      ))
+    ),
+    sel&&h("div",{style:{padding:"8px 18px",background:"rgba(0,51,204,0.05)",borderBottom:"0.5px solid rgba(0,51,204,0.2)",borderLeft:"3px solid #0033CC",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}},
+      h("span",{style:{fontSize:"11px",color:"#555",fontWeight:500}},sel.name+" · "+sel.dayKey),
+      CODES.map(c=>h("button",{key:c.code,onClick:()=>applyCode(c.code),style:{padding:"3px 10px",fontSize:"11px",fontWeight:500,borderRadius:6,border:`1.5px solid ${c.color}`,background:sel.code===c.code?c.bg:"transparent",color:c.color,cursor:"pointer"}},c.code+" – "+c.label)),
+      sel.code&&h("button",{onClick:async()=>{const nd={...data};delete nd[getCK(sel.name,vy,vm,sel.day)];setData(nd);await saveData(nd);setSel(null);},style:{padding:"3px 9px",fontSize:"11px",borderRadius:6,border:"0.5px solid #ccd",background:"transparent",color:"#666",cursor:"pointer"}},"Clear"),
+      h("button",{onClick:()=>setSel(null),style:{marginLeft:"auto",padding:"3px 8px",fontSize:"11px",borderRadius:6,border:"0.5px solid #ccd",background:"transparent",color:"#aaa",cursor:"pointer"}},"✕")
+    ),
+    h("div",{style:{overflowX:"auto",background:"rgba(255,255,255,0.5)"}},
+      h("table",{style:{borderCollapse:"collapse",width:"100%"}},
+        h("thead",null,h("tr",null,
+          h("th",{style:{position:"sticky",left:0,background:"rgba(255,255,255,0.97)",zIndex:2,padding:"5px 12px",textAlign:"left",fontWeight:500,fontSize:"11px",color:"#888",borderBottom:"0.5px solid #dde",minWidth:175,whiteSpace:"nowrap"}},"Member"),
+          ...days.map(d=>{
+            const wd=getWd(vy,vm,d);
+            const isWe=wd===0||wd===6;
+            const isTdy=vy===today.getFullYear()&&vm===today.getMonth()&&d===today.getDate();
+            return h("th",{key:d,style:{padding:"3px 1px",minWidth:25,width:25,textAlign:"center",fontSize:"10px",fontWeight:isTdy?700:400,color:isTdy?"#0033CC":isWe?"#ccc":"#888",background:isTdy?"rgba(0,51,204,0.1)":"rgba(255,255,255,0.9)",borderBottom:"0.5px solid #dde"}},
+              h("div",null,d),h("div",{style:{fontSize:"8px",opacity:0.6}},WEEKDAYS[wd])
+            );
+          }),
+          h("th",{style:{padding:"5px 8px",textAlign:"center",fontSize:"11px",fontWeight:500,color:"#888",borderBottom:"0.5px solid #dde",minWidth:90,whiteSpace:"nowrap",background:"rgba(255,255,255,0.9)"}},"Summary")
+        )),
+        h("tbody",null,
+          filtered.map((member,idx)=>{
+            const stats={};CODES.forEach(c=>{stats[c.code]=0;});
+            days.forEach(d=>{const c=getCode(member.name,d);if(c&&stats[c]!==undefined)stats[c]++;});
+            const rowBg=idx%2===0?"rgba(255,255,255,0.5)":"rgba(0,51,204,0.025)";
+            return h("tr",{key:member.name},
+              h("td",{style:{position:"sticky",left:0,zIndex:1,background:idx%2===0?"rgba(255,255,255,0.97)":"rgba(247,249,255,0.97)",padding:"4px 12px",borderBottom:"0.5px solid #eef",whiteSpace:"nowrap"}},
+                h("div",{style:{fontSize:"12px",color:"#222",fontWeight:500}},member.name),
+                h("div",{style:{fontSize:"10px",color:"#aaa"}},member.region+" · "+member.country)
+              ),
+              ...days.map(d=>{
+                const wd=getWd(vy,vm,d);
+                const isWe=wd===0||wd===6;
+                const dayKey=`${vy}-${String(vm+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+                const code=getCode(member.name,d);
+                const ci=code?CODE_MAP[code]:null;
+                const isSel=sel?.name===member.name&&sel?.day===d;
+                return h("td",{key:d,onClick:()=>setSel({name:member.name,day:d,dayKey,code}),style:{padding:"2px 1px",textAlign:"center",background:isSel?"rgba(0,51,204,0.13)":isWe?"rgba(0,51,204,0.03)":rowBg,borderBottom:"0.5px solid #eef",cursor:"pointer",width:25}},
+                  code&&ci?h("span",{style:{display:"inline-flex",alignItems:"center",justifyContent:"center",width:19,height:19,borderRadius:3,background:ci.bg,color:ci.color,fontSize:"9px",fontWeight:700,border:`1px solid ${ci.color}60`}},code)
+                  :h("span",{style:{display:"inline-block",width:19,height:19}})
+                );
+              }),
+              h("td",{style:{padding:"3px 8px",borderBottom:"0.5px solid #eef",background:rowBg}},
+                h("div",{style:{display:"flex",gap:2,justifyContent:"center",flexWrap:"wrap"}},
+                  CODES.map(c=>stats[c.code]>0?h("span",{key:c.code,style:{fontSize:"9px",padding:"1px 4px",borderRadius:3,background:c.bg,color:c.color,fontWeight:700,border:`1px solid ${c.color}50`}},c.code+":"+stats[c.code]):null)
+                )
+              )
+            );
+          })
+        )
+      )
+    ),
+    h("div",{style:{padding:"8px 18px",borderTop:"0.5px solid #dde",display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",background:"rgba(0,30,150,0.04)"}},
+      regionData.map(({r,count,ooo})=>h("div",{key:r,style:{background:"rgba(255,255,255,0.88)",borderRadius:8,padding:"5px 10px",border:"0.5px solid rgba(0,51,204,0.12)"}},
+        h("div",{style:{fontWeight:600,fontSize:"11px",color:"#0033CC"}},r),
+        h("div",{style:{fontSize:"10px",color:"#666"}},count+" members · "+ooo+" OOO days")
+      )),
+      h("div",{style:{marginLeft:"auto",fontSize:"11px",color:"#aaa"}},"Click any cell to set code · 🔥 Live sync via Firebase — all teammates see changes instantly")
+    )
+  );
+
+  return h("div",{style:{fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",fontSize:"13px",position:"relative"}},
+    note&&h("div",{style:{position:"fixed",top:14,right:14,zIndex:999,background:"#0033CC",color:"white",padding:"7px 16px",borderRadius:8,fontSize:"12px",fontWeight:500,boxShadow:"0 2px 12px rgba(0,51,204,0.3)"}},note),
+    React.createElement(Header),
+    React.createElement(TabNav),
+    tab==="dashboard"?React.createElement(Dashboard):React.createElement(Tracker)
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(App));
+</script>
+</body>
+</html>
